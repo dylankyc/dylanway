@@ -1,0 +1,430 @@
+services:
+  # MyWay LLM Router Server
+  myway-server:
+    image: dylandylandy/dylandy:latest
+    container_name: myway-server
+    #platform: linux/arm64
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+      opensearch-dashboards:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+      jaeger:
+        condition: service_healthy
+
+    ports:
+      - "9999:9999" # Main API port
+    environment:
+      # API Keys for LLM providers
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - AZURE_OPENAI_API_KEY=${AZURE_OPENAI_API_KEY}
+      - AZURE_OPENAI_INSTANCE_NAME=${AZURE_OPENAI_INSTANCE_NAME}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - COHERE_API_KEY=${COHERE_API_KEY}
+      - MISTRAL_API_KEY=${MISTRAL_API_KEY}
+      - HUGGINGFACE_API_KEY=${HUGGINGFACE_API_KEY}
+      - MINIMAX_API_KEY=${MINIMAX_API_KEY}
+
+      # AWS credentials for Bedrock
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
+      - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}
+      # Infrastructure
+      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/myway
+
+      - MINIO_ENDPOINT=http://minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+
+      # S3 Sink Configuration
+      # - S3_BUCKET=${S3_BUCKET:-myway-llm-events}
+      - S3_BUCKET=${S3_BUCKET:-llm-event-tests}
+      - S3_REGION=${S3_REGION:-us-west-1}
+      - S3_ENDPOINT=${S3_ENDPOINT:-}
+      - S3_PATH_STYLE_ACCESS=${S3_PATH_STYLE_ACCESS:-false}
+      # Additional sink configurations
+      - ELASTICSEARCH_PASSWORD=changeme
+      - CLICKHOUSE_PASSWORD=clickhouse123
+      - LOKI_ENDPOINT=http://loki:3100
+      - REDIS_URL=redis://redis:6379
+
+      # Application settings
+      - LOG_LEVEL=${LOG_LEVEL}
+      - RUST_LOG=${RUST_LOG}
+      - MYWAY_ENVIRONMENT=${MYWAY_ENVIRONMENT}
+
+      # OpenTelemetry configuration
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
+      - OTEL_SERVICE_NAME=myway-server
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=myway-server,service.version=0.1.0
+    volumes:
+      - ./config:/app/config
+    networks:
+      - myway-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9999/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # PostgreSQL Database (for PostgreSQL sink)
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=myway
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Initialize the database with required tables
+      - ./scripts/init-postgres.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - myway-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Redis (for rate limiting in production)
+  redis:
+    image: redis:7.2-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+    command: >
+      sh -c "if [ -n \"$$REDIS_PASSWORD\" ]; then
+        redis-server --requirepass $$REDIS_PASSWORD --maxmemory 256mb --maxmemory-policy allkeys-lru;
+      else
+        redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru;
+      fi"
+    volumes:
+      - redis-data:/data
+    networks:
+      - myway-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  # OpenSearch (Elasticsearch-compatible search engine)
+  opensearch:
+    image: opensearchproject/opensearch:2.11.0
+    container_name: opensearch
+    environment:
+      - cluster.name=myway-cluster
+      - node.name=myway-node
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+      - "DISABLE_INSTALL_DEMO_CONFIG=true"
+      - "DISABLE_SECURITY_PLUGIN=true"
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    networks:
+      - myway-network
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test:
+        ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # OpenSearch Dashboard (for LLM log visualization)
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:2.11.0
+    container_name: opensearch-dashboards
+    depends_on:
+      opensearch:
+        condition: service_healthy
+    environment:
+      - OPENSEARCH_HOSTS=["http://opensearch:9200"]
+      - "DISABLE_SECURITY_DASHBOARDS_PLUGIN=true"
+      - "SERVER_HOST=0.0.0.0"
+    ports:
+      - "5601:5601"
+    networks:
+      - myway-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:5601/api/status || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # Dashboard Setup (automatic index pattern creation)
+  dashboard-setup:
+    image: curlimages/curl:8.4.0
+    container_name: dashboard-setup
+    depends_on:
+      opensearch-dashboards:
+        condition: service_healthy
+    volumes:
+      - ./scripts/setup-opensearch-dashboards.sh:/setup-opensearch-dashboards.sh:ro
+    command: sh /setup-opensearch-dashboards.sh
+    networks:
+      - myway-network
+    restart: "no" # Run once only
+
+  # ClickHouse (for ClickHouse sink)
+  clickhouse:
+    image: clickhouse/clickhouse-server:23.12
+    container_name: clickhouse
+    environment:
+      - CLICKHOUSE_DB=myway
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+      - CLICKHOUSE_PASSWORD=clickhouse123
+    ports:
+      - "8123:8123"
+      - "9002:9000"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./scripts/init-clickhouse.sql:/docker-entrypoint-initdb.d/init.sql # Table initialization from SQL file
+    networks:
+      - myway-network
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://localhost:8123/ping",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # MinIO (S3-compatible storage for S3 sink)
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+    networks:
+      - myway-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Create default bucket in MinIO
+  minio-init:
+    image: minio/mc
+    container_name: minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc alias set myminio http://minio:9000 minioadmin minioadmin;
+      /usr/bin/mc mb myminio/myway-llm-events;
+      /usr/bin/mc anonymous set download myminio/myway-llm-events;
+      exit 0;
+      "
+    networks:
+      - myway-network
+
+  # Jaeger v2 (single binary with OpenTelemetry Collector)
+  jaeger:
+    image: jaegertracing/jaeger:2.11.0
+    container_name: jaeger
+    ports:
+      - "16686:16686" # Jaeger UI
+      - "4317:4317" # OTLP gRPC receiver
+      - "4318:4318" # OTLP HTTP receiver
+      - "14250:14250" # Jaeger gRPC
+      - "14268:14268" # Jaeger HTTP
+      - "8888:8888" # Internal metrics
+    environment:
+      - SPAN_STORAGE_TYPE=memory
+    depends_on:
+      - prometheus
+    networks:
+      - myway-network
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://localhost:16686/",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # Prometheus (for resource monitoring)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/etc/prometheus/console_libraries"
+      - "--web.console.templates=/etc/prometheus/consoles"
+      - "--storage.tsdb.retention.time=200h"
+      - "--web.enable-lifecycle"
+    networks:
+      - myway-network
+
+  # Loki (for log aggregation)
+  loki:
+    image: grafana/loki:2.9.0
+    container_name: loki
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - loki-data:/loki
+      - ./config/loki/loki-config.yaml:/etc/loki/local-config.yaml:ro
+    networks:
+      - myway-network
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget --no-verbose --tries=1 --spider http://localhost:3100/ready || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Promtail (for log collection)
+  # promtail:
+  #   image: grafana/promtail:2.9.0
+  #   container_name: promtail
+  #   volumes:
+  #     - ./config/promtail/promtail-config.yaml:/etc/promtail/config.yml:ro
+  #     # - /var/log:/var/log:ro
+  #     # - /var/lib/docker/containers:/var/lib/docker/containers:ro
+  #     # - /var/run/docker.sock:/var/run/docker.sock:ro  # Add Docker socket access
+  #   command: -config.file=/etc/promtail/config.yml
+  #   networks:
+  #     - myway-network
+  #   depends_on:
+  #     loki:
+  #       condition: service_healthy
+
+  # Grafana (for metrics and logs visualization)
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards
+    networks:
+      - myway-network
+    depends_on:
+      - prometheus
+      - loki
+      - jaeger
+
+  # Simple UI for testing (optional)
+  myway-ui:
+    image: nginx:alpine
+    container_name: myway-ui
+    volumes:
+      - ./ui:/usr/share/nginx/html
+    ports:
+      - "8080:80"
+    networks:
+      - myway-network
+    depends_on:
+      - myway-server
+
+  # OpenSearch Dashboard Setup (auto-creates index patterns)
+  opensearch-setup:
+    image: curlimages/curl:8.5.0
+    container_name: opensearch-setup
+    depends_on:
+      opensearch-dashboards:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+    volumes:
+      - ./scripts:/scripts:ro
+    networks:
+      - myway-network
+    command: >
+      sh -c "
+        echo 'Setting up OpenSearch Dashboard with comprehensive configuration...';
+        /scripts/setup-opensearch-dashboard-complete.sh;
+        echo 'OpenSearch Dashboard setup complete!'
+      "
+    restart: "no"
+
+
+networks:
+  myway-network:
+    driver: bridge
+
+volumes:
+  redis-data:
+  postgres-data:
+  opensearch-data:
+  clickhouse-data:
+  minio-data:
+  prometheus-data:
+  grafana-data:
+  loki-data:

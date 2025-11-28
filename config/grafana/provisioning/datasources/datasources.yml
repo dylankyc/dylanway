@@ -1,0 +1,87 @@
+apiVersion: 1
+
+datasources:
+  # Prometheus datasource for metrics (default)
+  - name: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    uid: prometheus
+    isDefault: true
+    editable: true
+    basicAuth: false
+    withCredentials: false
+    jsonData:
+      httpMethod: POST
+      queryTimeout: 60s
+      timeInterval: 5s
+      prometheusType: Prometheus
+      prometheusVersion: 2.40.0
+      manageAlerts: true
+      alertmanagerUid: ""
+    secureJsonData: {}
+    version: 1
+
+  # Loki datasource for logs
+  - name: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    uid: loki
+    isDefault: false
+    editable: true
+    basicAuth: false
+    withCredentials: false
+    jsonData:
+      maxLines: 1000
+      derivedFields:
+        - name: "TraceID"
+          matcherRegex: "trace_id=(\\w+)"
+          url: "http://localhost:16686/trace/$${__value.raw}"
+          datasourceUid: jaeger
+        - name: "RequestID"
+          matcherRegex: 'request_id="([^"]+)"'
+          url: "/explore?left=%5B%22now-1h%22,%22now%22,%22prometheus%22,%7B%22expr%22:%22%7Brequest_id%3D%5C%22$${__value.raw}%5C%22%7D%22%7D%5D"
+          datasourceUid: prometheus
+    secureJsonData: {}
+    version: 1
+
+  # Jaeger datasource for traces
+  - name: jaeger
+    type: jaeger
+    access: proxy
+    url: http://jaeger:16686
+    uid: jaeger
+    isDefault: false
+    editable: true
+    basicAuth: false
+    withCredentials: false
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanStartTimeShift: -1h
+        spanEndTimeShift: 1h
+        filterByTraceID: true
+        filterBySpanID: false
+        customQuery: true
+        query: '{job="myway"} |= "$${__trace.traceId}"'
+        tags:
+          - key: request_id
+            value: request_id
+      tracesToMetrics:
+        datasourceUid: prometheus
+        spanStartTimeShift: -1h
+        spanEndTimeShift: 1h
+        queries:
+          - name: "Request Rate"
+            query: "rate(http_requests_total{}[5m])"
+          - name: "Request Duration"
+            query: "histogram_quantile(0.95, rate(http_response_time_seconds_bucket{}[5m]))"
+          - name: "Error Rate"
+            query: 'rate(http_requests_total{status=~"5.."}[5m])'
+      nodeGraph:
+        enabled: true
+      lokiSearch:
+        datasourceUid: loki
+    secureJsonData: {}
+    version: 1

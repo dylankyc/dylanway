@@ -1,0 +1,67 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  # "first_rules.yml"
+  # "second_rules.yml"
+
+scrape_configs:
+  # MyWay Application Metrics
+  - job_name: "myway"
+    static_configs:
+      - targets: ["myway-server:9999"]
+    scrape_interval: 5s
+    metrics_path: /metrics
+
+  # Jaeger v2 internal metrics
+  - job_name: "jaeger-v2-internal"
+    scrape_interval: 10s
+    static_configs:
+      - targets: ["jaeger:8888"]
+        labels:
+          group: "jaeger-internal"
+    metrics_path: "/metrics"
+
+  # Prometheus self-monitoring
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # PostgreSQL metrics (if pg_exporter is used)
+  # - job_name: 'postgres'
+  #   static_configs:
+  #     - targets: ['postgres_exporter:9187']
+
+  # MySQL metrics (if mysql_exporter is used)
+  # - job_name: 'mysql'
+  #   static_configs:
+  #     - targets: ['mysql_exporter:9104']
+
+  # MinIO metrics (if minio_exporter is used)
+  # - job_name: 'minio'
+  #   static_configs:
+  #     - targets: ['minio:9000']
+  #   metrics_path: /minio/v2/metrics/cluster
+
+  # ClickHouse metrics (if clickhouse_exporter is used)
+  # - job_name: 'clickhouse'
+  #   static_configs:
+  #     - targets: ['clickhouse_exporter:9116']
+
+  # OpenSearch/Elasticsearch metrics (if elasticsearch_exporter is used)
+  # - job_name: 'elasticsearch'
+  #   static_configs:
+  #     - targets: ['elasticsearch_exporter:9114']
+
+  # Grafana metrics (internal)
+  # - job_name: 'grafana'
+  #   static_configs:
+  #     - targets: ['grafana:3000']
+  #   metrics_path: /metrics
+
+  # Loki metrics (internal)
+  # - job_name: 'loki'
+  #   static_configs:
+  #     - targets: ['loki:3100']
+  #   metrics_path: /metrics
